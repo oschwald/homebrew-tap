@@ -18,4 +18,10 @@ Upgrade with:
 brew upgrade --cask oschwald/tap/maxminddb-mcp
 ```
 
+The binary is not signed or notarized by Apple. Homebrew marks downloaded files as quarantined, so macOS may refuse to run it. If an MCP client cannot start the server, or macOS says the developer cannot be verified, clear the quarantine flag after installing and after each upgrade:
+
+```sh
+xattr -d com.apple.quarantine "$(brew --prefix)/bin/maxminddb-mcp"
+```
+
 See the [installation guide](https://github.com/oschwald/maxminddb-mcp#installation) for configuration and Claude Desktop extensions.
