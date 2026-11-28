@@ -21,7 +21,9 @@ cask "maxminddb-mcp" do
     skip "Auto-generated on release."
   end
 
+  depends_on :macos
+
   binary "maxminddb-mcp"
 
-  # No zap stanza required
+  zap :not_required
 end
