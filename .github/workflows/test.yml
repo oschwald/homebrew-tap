@@ -1,0 +1,100 @@
+name: Test cask
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs for the same pull request. Other events get a
+# unique group so they never cancel each other.
+concurrency:
+  group: test-cask-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_ANALYTICS: 1
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+jobs:
+  test:
+    name: Audit and install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # One runner per cask architecture: arm64 and Intel.
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Runner images ship the Homebrew that was current when the image was
+      # built, and the Intel image's is too old to load `zap :not_required`.
+      # Users get the latest Homebrew through auto-update, so test with that.
+      - name: Update Homebrew
+        run: brew update
+
+      # Point the oschwald/tap tap at this checkout so the commands below test
+      # the cask from this commit, not the one on GitHub's main branch.
+      - name: Link tap to checkout
+        run: |
+          tap_dir="$(brew --repository)/Library/Taps/oschwald/homebrew-tap"
+          mkdir -p "$(dirname "$tap_dir")"
+          rm -rf "$tap_dir"
+          ln -s "$GITHUB_WORKSPACE" "$tap_dir"
+          # Homebrew ignores casks from untrusted taps. This tap is the code
+          # under test, so trust it.
+          brew trust oschwald/tap
+
+      - name: Check style
+        # GoReleaser generates the cask on each maxminddb-mcp release. Since
+        # 2.20 it writes `depends_on :macos` directly under the livecheck block
+        # with no blank line, which Cask/StanzaGrouping rejects. A hand fix
+        # would be overwritten by the next release, so skip only that cop.
+        run: brew style --except-cops Cask/StanzaGrouping oschwald/tap
+
+      # The checks below run even if an earlier one fails, so one run reports
+      # every problem with the cask.
+      - name: Audit cask
+        if: ${{ !cancelled() }}
+        # The online audit calls the GitHub API, which rate limits
+        # unauthenticated requests from shared runners.
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew audit --cask --online --strict oschwald/tap/maxminddb-mcp
+
+      - name: Install cask
+        id: install
+        if: ${{ !cancelled() }}
+        run: brew install --cask oschwald/tap/maxminddb-mcp
+
+      - name: Run installed binary
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          expected="$(brew info --cask --json=v2 oschwald/tap/maxminddb-mcp | jq -r '.casks[0].version')"
+          binary="$(brew --prefix)/bin/maxminddb-mcp"
+          # Show the quarantine and signature state to help diagnose Gatekeeper failures.
+          xattr -l "$binary" || true
+          codesign -dv "$binary" || true
+          output="$("$binary" --version)"
+          echo "$output"
+          case "$output" in
+            "maxminddb-mcp $expected" | "maxminddb-mcp $expected "*) ;;
+            *)
+              echo "::error::Expected version $expected, got: $output"
+              exit 1
+              ;;
+          esac
+
+      - name: Uninstall cask
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: brew uninstall --cask oschwald/tap/maxminddb-mcp
